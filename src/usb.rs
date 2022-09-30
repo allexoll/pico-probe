@@ -3,6 +3,7 @@ use defmt::*;
 use rp2040_hal::usb::UsbBus;
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::SerialPort;
+use crate::vcp;
 
 /// Implements the CMSIS DAP descriptors.
 pub struct ProbeUsb {
@@ -13,6 +14,12 @@ pub struct ProbeUsb {
     dap_v2: CmsisDapV2<'static, UsbBus>,
     serial: SerialPort<'static, UsbBus>,
     // dfu: DfuRuntime,
+}
+
+/// Probe USB request enum
+pub enum ProbeUsbRequest {
+    DAP(Request),
+    VCPPacket(([u8; vcp::VCP_PACKET_SIZE as usize], usize)),
 }
 
 impl ProbeUsb {
@@ -47,7 +54,7 @@ impl ProbeUsb {
         }
     }
 
-    pub fn interrupt(&mut self) -> Option<Request> {
+    pub fn interrupt(&mut self, vcp_idle: bool) -> Option<ProbeUsbRequest> {
         if self.device.poll(&mut [
             &mut self.winusb,
             &mut self.dap_v1,
@@ -59,22 +66,30 @@ impl ProbeUsb {
             let new_state = self.device.state();
             self.device_state = new_state;
             if (old_state != new_state) && (new_state != UsbDeviceState::Configured) {
-                return Some(Request::Suspend);
+                return Some(ProbeUsbRequest::DAP(Request::Suspend));
             }
 
             let r = self.dap_v1.process();
-            if r.is_some() {
-                return r;
+            if let Some(r) = r {
+                return Some(ProbeUsbRequest::DAP(r));
             }
 
             let r = self.dap_v2.process();
-            if r.is_some() {
-                return r;
+            if let Some(r) = r {
+                return Some(ProbeUsbRequest::DAP(r));
             }
 
-            // Discard data from the serial interface
-            let mut buf = [0; 64 as usize];
-            let _ = self.serial.read(&mut buf);
+            if vcp_idle {
+                let mut buf = [0; vcp::VCP_PACKET_SIZE as usize];
+                let serialdata = self.serial.read(&mut buf);
+                match serialdata {
+                    Ok(x) => {
+                        return Some(ProbeUsbRequest::VCPPacket((buf, x)));
+                    }
+                    // discard error?
+                    Err(_e) => (),
+                }
+            }
         }
         None
     }
@@ -91,5 +106,12 @@ impl ProbeUsb {
         self.dap_v2
             .write_packet(data)
             .expect("DAPv2 EP write failed");
+    }
+
+    /// Transmit a VCP packet back over the VCP interface
+    pub fn vcp_reply(&mut self, data: &[u8]) {
+        self.serial
+            .write(data)
+            .expect("VCP EP write failed");
     }
 }

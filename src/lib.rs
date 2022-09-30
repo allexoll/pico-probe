@@ -10,6 +10,7 @@ pub mod pio;
 pub mod setup;
 pub mod systick_delay;
 pub mod usb;
+pub mod vcp;
 
 defmt::timestamp! {"{=u64}", {
     static COUNT: AtomicUsize = AtomicUsize::new(0);

@@ -18,11 +18,13 @@ mod app {
     type Monotonic = Rp2040Monotonic;
 
     #[shared]
-    struct Shared {}
+    struct Shared {
+        vcp: pico_probe::vcp::VCP,
+        probe_usb: pico_probe::usb::ProbeUsb,
+    }
 
     #[local]
     struct Local {
-        probe_usb: pico_probe::usb::ProbeUsb,
         dap_handler: DapHandler,
         led: LedPin,
         adc: AdcReader,
@@ -33,15 +35,14 @@ mod app {
         delay: MaybeUninit<pico_probe::systick_delay::Delay> = MaybeUninit::uninit(),
     ])]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
-        let (mono, led, probe_usb, dap_handler, adc, translator_power, target_power) =
+        let (mono, led, probe_usb, dap_handler, vcp, adc, translator_power, target_power) =
             setup(cx.device, cx.core, cx.local.usb_bus, cx.local.delay);
 
         led_blinker::spawn().ok();
 
         (
-            Shared {},
+            Shared { vcp , probe_usb},
             Local {
-                probe_usb,
                 dap_handler,
                 led,
                 adc,
@@ -58,35 +59,54 @@ mod app {
         led_blinker::spawn_after(1000.millis()).ok();
     }
 
-    #[task(binds = USBCTRL_IRQ, local = [probe_usb, dap_handler, resp_buf: [u8; 64] = [0; 64]])]
-    fn on_usb(ctx: on_usb::Context) {
-        let probe_usb = ctx.local.probe_usb;
+    #[task(binds = USBCTRL_IRQ, local = [dap_handler, resp_buf: [u8; 64] = [0; 64]], shared = [probe_usb, vcp])]
+    fn on_usb(mut ctx: on_usb::Context) {
+        let mut probe_usb = ctx.shared.probe_usb;
         let dap = ctx.local.dap_handler;
         let resp_buf = ctx.local.resp_buf;
 
-        if let Some(request) = probe_usb.interrupt() {
+
+        if let Some(request) = probe_usb.lock(|f| f.interrupt(true)) {
             use dap_rs::{dap::DapVersion, usb::Request};
+            use pico_probe::usb::ProbeUsbRequest;
 
             match request {
-                Request::DAP1Command((report, n)) => {
-                    let len = dap.process_command(&report[..n], resp_buf, DapVersion::V1);
+                ProbeUsbRequest::DAP(dap_req) => match dap_req {
+                    Request::DAP1Command((report, n)) => {
+                        let len = dap.process_command(&report[..n], resp_buf, DapVersion::V1);
 
-                    if len > 0 {
-                        probe_usb.dap1_reply(&resp_buf[..len]);
+                        if len > 0 {
+                            probe_usb.lock(|f| f.dap1_reply(&resp_buf[..len]));
+                        }
                     }
-                }
-                Request::DAP2Command((report, n)) => {
-                    let len = dap.process_command(&report[..n], resp_buf, DapVersion::V2);
+                    Request::DAP2Command((report, n)) => {
+                        let len = dap.process_command(&report[..n], resp_buf, DapVersion::V2);
 
-                    if len > 0 {
-                        probe_usb.dap2_reply(&resp_buf[..len]);
+                        if len > 0 {
+                            probe_usb.lock(|f|f.dap2_reply(&resp_buf[..len]));
+                        }
                     }
-                }
-                Request::Suspend => {
-                    info!("Got USB suspend command");
-                    dap.suspend();
+                    Request::Suspend => {
+                        info!("Got USB suspend command");
+                        dap.suspend();
+                    }
+                },
+                ProbeUsbRequest::VCPPacket((buffer, n)) => {
+                    ctx.shared.vcp.lock(|f| f.write(&buffer, n));
                 }
             }
         }
+
+    }
+
+    #[idle(shared = [vcp, probe_usb])]
+    fn idle(mut cx: idle::Context) -> ! {
+       loop{
+        let mut buffer = [0u8; 64];
+        let n = cx.shared.vcp.lock(|f| f.read(&mut buffer));
+        if n > 0 {
+            cx.shared.probe_usb.lock(|f| f.vcp_reply(&buffer[..n]));
+        }
+       }
     }
 }

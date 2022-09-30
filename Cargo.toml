@@ -24,6 +24,7 @@ pio = "0.2"
 # If you're not going to use a Board Support Package you'll need these:
 rp2040-hal = { version="0.6.0", features=["rt"] }
 rp2040-boot2 = "0.2.0"
+heapless = "0.7.16"
 
 # cargo build/run
 [profile.dev]

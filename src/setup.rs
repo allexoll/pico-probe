@@ -5,6 +5,7 @@ use core::mem::MaybeUninit;
 use embedded_hal::adc::OneShot;
 use embedded_hal::digital::v2::OutputPin;
 use embedded_hal::PwmPin;
+use rp2040_hal::multicore::Multicore;
 use rp2040_hal::{
     clocks::init_clocks_and_plls,
     gpio::{
@@ -20,6 +21,7 @@ use rp2040_hal::{
 use rp2040_monotonic::Rp2040Monotonic;
 use usb_device::class_prelude::UsbBusAllocator;
 
+use crate::vcp::VCP;
 const XOSC_CRYSTAL_FREQ: u32 = 12_000_000;
 
 pub type DapHandler = dap_rs::dap::Dap<'static, Context, Leds, Wait, Jtag, Swd, Swo>;
@@ -33,7 +35,7 @@ pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 #[inline(always)]
 pub fn setup(
-    pac: pac::Peripherals,
+    mut pac: pac::Peripherals,
     core: cortex_m::Peripherals,
     usb_bus: &'static mut MaybeUninit<UsbBusAllocator<UsbBus>>,
     delay: &'static mut MaybeUninit<Delay>,
@@ -42,6 +44,7 @@ pub fn setup(
     LedPin,
     ProbeUsb,
     DapHandler,
+    VCP,
     AdcReader,
     TranslatorPower,
     TargetPower,
@@ -72,7 +75,7 @@ pub fn setup(
 
     let probe_usb = ProbeUsb::new(&usb_bus);
 
-    let sio = Sio::new(pac.SIO);
+    let mut sio = Sio::new(pac.SIO);
     let pins = Pins::new(pac.IO_BANK0, pac.PADS_BANK0, sio.gpio_bank0, &mut resets);
 
     let mut led_red = pins.gpio27.into_push_pull_output();
@@ -142,6 +145,25 @@ pub fn setup(
     let dir_vcp_rx = pins.gpio25;
     let dir_vcp_tx = pins.gpio24;
 
+    let uart_pins = (
+        dir_vcp_tx.into_mode::<rp2040_hal::gpio::FunctionUart>(),
+        dir_vcp_rx.into_mode::<rp2040_hal::gpio::FunctionUart>(),
+    );  // TODO: these are the wrong pins, but the correct pins are not available
+        // on the current board
+
+    let uart = rp2040_hal::uart::UartPeripheral::new(pac.UART1, uart_pins, &mut resets)
+        .enable(
+            rp2040_hal::uart::common_configs::_9600_8_N_1,
+            clocks.peripheral_clock.freq(),
+        )
+        .unwrap();
+
+    let mut mc = Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
+    let cores = mc.cores();
+    let core1 = &mut cores[1];
+    let mut vcp = VCP::new(uart, &clocks.peripheral_clock, core1);
+    vcp.setup();
+
     // High speed IO
     io.set_drive_strength(OutputDriveStrength::TwelveMilliAmps);
     io.set_slew_rate(OutputSlewRate::Fast);
@@ -173,6 +195,7 @@ pub fn setup(
         led_blue,
         probe_usb,
         dap_hander,
+        vcp,
         adc,
         translator_power,
         target_power,
